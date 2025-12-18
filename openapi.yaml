@@ -1,0 +1,373 @@
+openapi: 3.0.3
+info:
+  title: WeCloud Composite Service API
+  version: 1.0.0
+  description: >
+    Composite service acting as a unified gateway in front of atomic microservices.
+    Provides generic proxy endpoints, health checks, and aggregated endpoints.
+
+servers:
+  - url: https://composite-service-1081353560639.us-central1.run.app
+    description: Production (Cloud Run)
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: Health
+    description: Service health and dependency checks
+  - name: Aggregation
+    description: Aggregated endpoints (fan-out + merge)
+  - name: Proxy
+    description: Generic proxy endpoints that delegate to atomic microservices
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      operationId: healthCheck
+      summary: Health check for composite and dependent atomic services
+      description: >
+        Returns composite health and (optionally) dependency status for atomic services.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: One or more dependencies unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/dashboard/{userId}:
+    get:
+      tags: [Aggregation]
+      operationId: getDashboard
+      summary: Aggregated dashboard data for a user
+      description: >
+        Aggregates data across atomic microservices (e.g., users, routes, subscriptions).
+        Implementation may perform parallel fan-out calls and merge responses.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: Aggregated dashboard response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericJson"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: User not found (or no dashboard available)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/subscriptions:
+    post:
+      tags: [Proxy]
+      operationId: createSubscriptionWithFkValidation
+      summary: Create a subscription (with logical FK validation in composite)
+      description: >
+        Delegates creation to the Subscription atomic service, but enforces logical
+        foreign-key constraints in the composite layer (e.g., validates userId and routeId exist).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSubscriptionRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericJson"
+        "400":
+          description: Bad request (including logical FK violation)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FkViolation"
+                  - $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Downstream atomic service error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # -------- Generic proxy endpoints --------
+  # Note: OpenAPI path parameters cannot natively model greedy multi-segment paths.
+  # This spec documents delegation behavior; actual proxying may support deeper paths.
+  /api/auth:
+    $ref: "#/components/pathItems/ProxyBase"
+  /api/auth/{proxyPath}:
+    $ref: "#/components/pathItems/ProxyWithPath"
+
+  /api/users:
+    $ref: "#/components/pathItems/ProxyBase"
+  /api/users/{proxyPath}:
+    $ref: "#/components/pathItems/ProxyWithPath"
+
+  /api/routes:
+    $ref: "#/components/pathItems/ProxyBase"
+  /api/routes/{proxyPath}:
+    $ref: "#/components/pathItems/ProxyWithPath"
+
+  /api/trips:
+    $ref: "#/components/pathItems/ProxyBase"
+  /api/trips/{proxyPath}:
+    $ref: "#/components/pathItems/ProxyWithPath"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    GenericJson:
+      type: object
+      additionalProperties: true
+
+    ErrorResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        error:
+          type: string
+          example: ERROR
+        message:
+          type: string
+          example: Something went wrong
+
+    HealthResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          example: ok
+        dependencies:
+          type: object
+          additionalProperties: true
+          description: Optional per-service status information
+
+    CreateSubscriptionRequest:
+      type: object
+      required: [userId, routeId, semester]
+      properties:
+        userId:
+          type: integer
+          format: int64
+          example: 1
+        routeId:
+          type: integer
+          format: int64
+          example: 42
+        semester:
+          type: string
+          example: 2025F
+      additionalProperties: true
+
+    FkViolation:
+      type: object
+      required: [error, field]
+      properties:
+        error:
+          type: string
+          example: FOREIGN_KEY_VIOLATION
+        field:
+          type: string
+          example: routeId
+        message:
+          type: string
+          example: Referenced entity does not exist
+      additionalProperties: true
+
+  parameters:
+    ProxyPathParam:
+      name: proxyPath
+      in: path
+      required: true
+      schema:
+        type: string
+      description: >
+        Proxy path segment. For deeper paths, the implementation may accept additional segments
+        (or encoded slashes) depending on routing configuration.
+
+  requestBodies:
+    ProxyBody:
+      required: false
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GenericJson"
+
+  responses:
+    Proxy200:
+      description: Proxied response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GenericJson"
+    Proxy201:
+      description: Proxied created response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GenericJson"
+    Proxy204:
+      description: Proxied no-content response
+    Proxy4xx5xx:
+      description: Proxied error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  pathItems:
+    ProxyBase:
+      get:
+        tags: [Proxy]
+        operationId: proxyGetBase
+        summary: Generic GET proxy (base path)
+        description: Delegates GET requests to the appropriate atomic microservice.
+        responses:
+          "200": { $ref: "#/components/responses/Proxy200" }
+          "401": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "404": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "502": { $ref: "#/components/responses/Proxy4xx5xx" }
+      post:
+        tags: [Proxy]
+        operationId: proxyPostBase
+        summary: Generic POST proxy (base path)
+        requestBody:
+          $ref: "#/components/requestBodies/ProxyBody"
+        responses:
+          "201": { $ref: "#/components/responses/Proxy201" }
+          "200": { $ref: "#/components/responses/Proxy200" }
+          "400": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "401": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "502": { $ref: "#/components/responses/Proxy4xx5xx" }
+      put:
+        tags: [Proxy]
+        operationId: proxyPutBase
+        summary: Generic PUT proxy (base path)
+        requestBody:
+          $ref: "#/components/requestBodies/ProxyBody"
+        responses:
+          "200": { $ref: "#/components/responses/Proxy200" }
+          "204": { $ref: "#/components/responses/Proxy204" }
+          "400": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "401": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "502": { $ref: "#/components/responses/Proxy4xx5xx" }
+      patch:
+        tags: [Proxy]
+        operationId: proxyPatchBase
+        summary: Generic PATCH proxy (base path)
+        requestBody:
+          $ref: "#/components/requestBodies/ProxyBody"
+        responses:
+          "200": { $ref: "#/components/responses/Proxy200" }
+          "204": { $ref: "#/components/responses/Proxy204" }
+          "400": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "401": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "502": { $ref: "#/components/responses/Proxy4xx5xx" }
+      delete:
+        tags: [Proxy]
+        operationId: proxyDeleteBase
+        summary: Generic DELETE proxy (base path)
+        responses:
+          "204": { $ref: "#/components/responses/Proxy204" }
+          "200": { $ref: "#/components/responses/Proxy200" }
+          "401": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "404": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "502": { $ref: "#/components/responses/Proxy4xx5xx" }
+
+    ProxyWithPath:
+      parameters:
+        - $ref: "#/components/parameters/ProxyPathParam"
+      get:
+        tags: [Proxy]
+        operationId: proxyGetWithPath
+        summary: Generic GET proxy (subpath)
+        description: Delegates GET requests (subpath) to the appropriate atomic microservice.
+        responses:
+          "200": { $ref: "#/components/responses/Proxy200" }
+          "401": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "404": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "502": { $ref: "#/components/responses/Proxy4xx5xx" }
+      post:
+        tags: [Proxy]
+        operationId: proxyPostWithPath
+        summary: Generic POST proxy (subpath)
+        requestBody:
+          $ref: "#/components/requestBodies/ProxyBody"
+        responses:
+          "201": { $ref: "#/components/responses/Proxy201" }
+          "200": { $ref: "#/components/responses/Proxy200" }
+          "400": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "401": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "502": { $ref: "#/components/responses/Proxy4xx5xx" }
+      put:
+        tags: [Proxy]
+        operationId: proxyPutWithPath
+        summary: Generic PUT proxy (subpath)
+        requestBody:
+          $ref: "#/components/requestBodies/ProxyBody"
+        responses:
+          "200": { $ref: "#/components/responses/Proxy200" }
+          "204": { $ref: "#/components/responses/Proxy204" }
+          "400": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "401": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "502": { $ref: "#/components/responses/Proxy4xx5xx" }
+      patch:
+        tags: [Proxy]
+        operationId: proxyPatchWithPath
+        summary: Generic PATCH proxy (subpath)
+        requestBody:
+          $ref: "#/components/requestBodies/ProxyBody"
+        responses:
+          "200": { $ref: "#/components/responses/Proxy200" }
+          "204": { $ref: "#/components/responses/Proxy204" }
+          "400": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "401": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "502": { $ref: "#/components/responses/Proxy4xx5xx" }
+      delete:
+        tags: [Proxy]
+        operationId: proxyDeleteWithPath
+        summary: Generic DELETE proxy (subpath)
+        responses:
+          "204": { $ref: "#/components/responses/Proxy204" }
+          "200": { $ref: "#/components/responses/Proxy200" }
+          "401": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "404": { $ref: "#/components/responses/Proxy4xx5xx" }
+          "502": { $ref: "#/components/responses/Proxy4xx5xx" }
